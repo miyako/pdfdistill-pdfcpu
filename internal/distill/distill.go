@@ -7,8 +7,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"regexp"
 	"io"
+	"regexp"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
