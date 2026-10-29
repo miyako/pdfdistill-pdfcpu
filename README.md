@@ -44,11 +44,11 @@ Behaviour:
   statistics.
 * **The output is never larger than the input.** If the optimized result is not
   smaller, the original bytes are written unchanged.
-* Exit codes: `0` success, `1` runtime error (unreadable/encrypted PDF, I/O),
+* Exit codes: `0` success, `1` runtime error (unreadable PDF, I/O),
   `2` usage error.
 * `--no-images` leaves image streams byte-for-byte untouched (no JPEG, no
   downsampling, no Flate recompression of images).
-* Encrypted PDFs are refused.
+* Encrypted PDFs are passed through unchanged (original bytes written, exit 0).
 * Files are written atomically (temporary file + rename).
 
 ## What it does

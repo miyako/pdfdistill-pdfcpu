@@ -168,7 +168,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			pct = 100 * (1 - float64(st.OutputSize)/float64(st.InputSize))
 		}
 		note := ""
-		if st.UsedOriginal {
+		if st.Encrypted {
+			note = " (encrypted; original kept)"
+		} else if st.UsedOriginal {
 			note = " (no reduction; original kept)"
 		}
 		fmt.Fprintf(stderr, "%s -> %s: %d -> %d bytes (-%.1f%%)%s\n",

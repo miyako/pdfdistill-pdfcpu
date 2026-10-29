@@ -6,8 +6,8 @@ package distill
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"regexp"
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -38,6 +38,8 @@ type Stats struct {
 	InputSize    int
 	OutputSize   int
 	UsedOriginal bool
+	// Encrypted is set when the input is encrypted and was passed through unchanged.
+	Encrypted bool
 }
 
 type category int
@@ -116,8 +118,21 @@ func (d *doc) report(step string, prev *[numCats]int) {
 	*prev = cur
 }
 
-// ErrEncrypted is returned for encrypted input.
-var ErrEncrypted = errors.New("encrypted PDFs are not supported")
+// encryptRE matches an /Encrypt entry in a trailer or cross-reference stream dictionary.
+var encryptRE = regexp.MustCompile(`/Encrypt\s*(?:\d+\s+\d+\s+R|<<)`)
+
+// looksEncrypted reports whether a PDF that pdfcpu could not read appears to be encrypted
+// (e.g. it requires a user password).
+func looksEncrypted(in []byte) bool {
+	return encryptRE.Match(in)
+}
+
+func passThrough(in []byte, st Stats) ([]byte, Stats, error) {
+	st.OutputSize = len(in)
+	st.UsedOriginal = true
+	st.Encrypted = true
+	return in, st, nil
+}
 
 func readContext(in []byte, dedup bool) (*model.Context, error) {
 	conf := model.NewStatelessConfiguration()
@@ -163,10 +178,13 @@ func Distill(in []byte, opts Options) (out []byte, st Stats, err error) {
 	}
 	ctx, err := readContext(in, !opts.NoDedup)
 	if err != nil {
+		if looksEncrypted(in) {
+			return passThrough(in, st)
+		}
 		return nil, st, fmt.Errorf("reading PDF: %w", err)
 	}
 	if ctx.Encrypt != nil || ctx.E != nil {
-		return nil, st, ErrEncrypted
+		return passThrough(in, st)
 	}
 	d := &doc{ctx: ctx, xt: ctx.XRefTable, opts: opts, st: &st, touched: map[int]bool{}}
 	d.logf("input:     %d bytes, %d page(s), PDF %s", len(in), ctx.PageCount, ctx.HeaderVersion)

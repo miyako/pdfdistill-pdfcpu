@@ -479,3 +479,23 @@ func TestFontInAcroFormNotSubset(t *testing.T) {
 		t.Error("font referenced from AcroForm /DR was subset")
 	}
 }
+
+func TestEncryptedPassThrough(t *testing.T) {
+	in := readFixture(t)
+	for _, tc := range []struct{ name, user string }{{"owner-only", ""}, {"user-password", "secret"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := model.NewAESConfiguration(tc.user, "owner", 256)
+			var enc bytes.Buffer
+			if err := api.Encrypt(context.Background(), bytes.NewReader(in), &enc, conf); err != nil {
+				t.Fatal(err)
+			}
+			out, st, err := Distill(enc.Bytes(), DefaultOptions())
+			if err != nil {
+				t.Fatalf("Distill: %v", err)
+			}
+			if !st.Encrypted || !st.UsedOriginal || !bytes.Equal(out, enc.Bytes()) {
+				t.Errorf("expected pass-through (Encrypted=%v UsedOriginal=%v, %d -> %d)", st.Encrypted, st.UsedOriginal, enc.Len(), len(out))
+			}
+		})
+	}
+}
