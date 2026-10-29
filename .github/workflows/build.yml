@@ -1,0 +1,89 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          VERSION="$(git describe --tags --always --dirty)"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          mkdir -p dist/tmp
+          for arch in arm64 amd64; do
+            GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" \
+              -o "dist/tmp/pdfdistill-pdfcpu-darwin-${arch}" ./cmd/pdfdistill-pdfcpu
+          done
+          lipo -create -output dist/tmp/pdfdistill-pdfcpu \
+            dist/tmp/pdfdistill-pdfcpu-darwin-arm64 dist/tmp/pdfdistill-pdfcpu-darwin-amd64
+          lipo -info dist/tmp/pdfdistill-pdfcpu
+          for arch in amd64 arm64; do
+            GOOS=windows GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" \
+              -o "dist/tmp/windows-${arch}/pdfdistill-pdfcpu.exe" ./cmd/pdfdistill-pdfcpu
+          done
+          ./dist/tmp/pdfdistill-pdfcpu --version
+          ./dist/tmp/pdfdistill-pdfcpu testdata/ms-print-to-pdf-1.pdf -o dist/tmp/check.pdf -v
+          (cd dist/tmp && zip -q "../pdfdistill-pdfcpu-${VERSION}-macos-universal.zip" pdfdistill-pdfcpu)
+          for arch in amd64 arm64; do
+            (cd "dist/tmp/windows-${arch}" && zip -q "../../pdfdistill-pdfcpu-${VERSION}-windows-${arch}.zip" pdfdistill-pdfcpu.exe)
+          done
+          rm -rf dist/tmp
+          (cd dist && shasum -a 256 ./*.zip > SHA256SUMS.txt)
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdfdistill-pdfcpu-binaries
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdfdistill-pdfcpu-binaries
+          path: dist
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
