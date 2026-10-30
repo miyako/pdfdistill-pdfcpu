@@ -149,7 +149,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	result, st, err := distill.Distill(data, opts)
 	if err != nil {
-		fmt.Fprintf(stderr, "pdfdistill-pdfcpu: %s: %v\n", displayName(in), err)
+		fmt.Fprintf(stderr, "pdfdistill-pdfcpu: %s: %v\n", displayName(in, "stdin"), err)
 		return 1
 	}
 
@@ -174,14 +174,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			note = " (no reduction; original kept)"
 		}
 		fmt.Fprintf(stderr, "%s -> %s: %d -> %d bytes (-%.1f%%)%s\n",
-			displayName(in), displayName(out), st.InputSize, st.OutputSize, pct, note)
+			displayName(in, "stdin"), displayName(out, "stdout"), st.InputSize, st.OutputSize, pct, note)
 	}
 	return 0
 }
 
-func displayName(p string) string {
+// displayName returns p for user-facing messages, substituting stdName
+// ("stdin" or "stdout") for "-". Avoid angle brackets: the 4D wrapper shows
+// stderr in forms where "<name>" is parsed as a variable reference.
+func displayName(p, stdName string) string {
 	if p == "-" {
-		return "<stdio>"
+		return stdName
 	}
 	return p
 }
