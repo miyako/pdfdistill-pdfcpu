@@ -1,0 +1,17 @@
+{
+  "name": "pdfdistill-pdfcpu",
+  "description": "Reduce PDF file size",
+  "author": [
+    "Keisuke Miyako <keisuke.miyako@4D.com>"
+  ],
+  "license": "MIT",
+  "repository": "https://github.com/miyako/pdfdistill-pdfcpu",
+  "version": "20.0.0",
+  "tool": {
+    "platform": "macos",
+    "branch": "20.x",
+    "version": "20.7",
+    "build": "latest",
+    "arch": "arm"
+  }
+}
