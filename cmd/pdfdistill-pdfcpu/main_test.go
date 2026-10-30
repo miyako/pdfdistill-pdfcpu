@@ -65,8 +65,11 @@ func TestStdinStdout(t *testing.T) {
 	if len(out) >= len(in) {
 		t.Errorf("no reduction: %d -> %d", len(in), len(out))
 	}
-	if !strings.Contains(string(errOut), "->") {
+	if !strings.HasPrefix(string(errOut), "stdin -> stdout: ") {
 		t.Errorf("expected summary on stderr, got %q", errOut)
+	}
+	if strings.Contains(string(errOut), "<") {
+		t.Errorf("stderr must not contain angle-bracket placeholders: %q", errOut)
 	}
 	validate(t, out)
 
@@ -141,7 +144,7 @@ func TestUsageErrors(t *testing.T) {
 		}
 	}
 	_, stderr, code := cli(t, []byte("not a pdf"), "-")
-	if code != 1 || len(stderr) == 0 {
+	if code != 1 || !strings.HasPrefix(string(stderr), "pdfdistill-pdfcpu: stdin: ") {
 		t.Errorf("invalid PDF: exit %d, stderr %q", code, stderr)
 	}
 	_, stderr, _ = cli(t, nil, "--version")
