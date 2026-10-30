@@ -3,6 +3,8 @@
 #
 # Binaries for programs and plugins
 *.exe
+# ...except the CLI bundled in the 4D component (committed by the build workflow)
+!/pdfdistill-pdfcpu/Resources/bin/**/*.exe
 *.exe~
 *.dll
 *.so

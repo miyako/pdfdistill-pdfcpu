@@ -1,13 +1,13 @@
 # _CLI
 ### Abstract base class for wrapping a platform-native CLI executable.
 
-> cs.lopdf._CLI.new ( executableName : Text ; controller : 4D.Class ) : cs.lopdf._CLI
+> cs.pdfcpu._CLI.new ( executableName : Text ; controller : 4D.Class ) : cs.pdfcpu._CLI
 
 | Parameter | Type | | Description |
 | --- | --- | --- | --- |
 | executableName | Text | -> | Base name of the executable (without `.exe` on Windows) |
-| controller | 4D.Class | -> | Controller class to attach (default: `cs.lopdf._CLI_Controller`) |
-| Result | cs.lopdf._CLI | <- | New instance |
+| controller | 4D.Class | -> | Controller class to attach (default: `cs.pdfcpu._CLI_Controller`) |
+| Result | cs.pdfcpu._CLI | <- | New instance |
 
 ## Description
 
@@ -19,9 +19,9 @@ The constructor looks for the executable in `/RESOURCES/bin/{platform}/` of the 
 
 | Platform | `platform` value | Executable |
 | --- | --- | --- |
-| macOS | `macOS` | `pdfdistill-lopdf` |
-| Windows (x64) | `Windows` | `pdfdistill-lopdf.exe` |
-| Windows (ARM) | `WindowsARM` | `pdfdistill-lopdf.exe` |
+| macOS | `macOS` | `pdfdistill-pdfcpu` |
+| Windows (x64) | `Windows` | `pdfdistill-pdfcpu.exe` |
+| Windows (ARM) | `WindowsARM` | `pdfdistill-pdfcpu.exe` |
 
 ARM detection on Windows matches `System info.processor` against known ARM processor identifiers: `apple`, `snapdragon`, `qualcomm`, `oryon`, `sq`, `ampere`, `altra`, `neoverse`, `graviton`, `cobalt`, `cortex`, `arm`.
 
@@ -32,13 +32,13 @@ All properties are read-only.
 | Property | Type | Description |
 | --- | --- | --- |
 | name | Text | Class name |
-| EOL | Text | `"\n"` on macOS, `"\r\n"` on Windows |
+| EOL | Text | `"\n"` on all platforms (Go's `fmt` writes a bare `\n` and never translates it to `\r\n`, so the CLI's output ends lines with `\n` on Windows too) |
 | executableName | Text | Executable file name (with `.exe` on Windows) |
 | platform | Text | Platform folder name (see table above) |
 | currentDirectory | 4D.Folder | `/RESOURCES/bin/{platform}` folder |
 | executablePath | Text | Full path of the executable, or its bare name if it is not bundled |
 | executableFile | 4D.File | The expected executable file (may not exist) |
-| controller | cs.lopdf._CLI_Controller | Attached controller instance |
+| controller | cs.pdfcpu._CLI_Controller | Attached controller instance |
 
 ## .escape()
 
@@ -74,4 +74,4 @@ Converts a filesystem-relative file or folder into one with an absolute path.
 ## See also
 
 - [`_CLI_Controller`](_CLI_Controller.md) — manages `4D.SystemWorker` execution
-- [`distill`](distill.md) — extends `_CLI` to wrap the `pdfdistill-lopdf` executable
+- [`distill`](distill.md) — extends `_CLI` to wrap the `pdfdistill-pdfcpu` executable

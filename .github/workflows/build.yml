@@ -3,7 +3,11 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ['v*']
+    # The 4D component (incl. the binaries committed back by the `ship` job) is
+    # handled by publish.yml; don't rebuild the CLI for those changes.
+    paths-ignore:
+      - 'pdfdistill-pdfcpu/**'
   pull_request:
   workflow_dispatch:
 
@@ -11,15 +15,18 @@ permissions:
   contents: read
 
 env:
-  CGO_ENABLED: "0"
+  CGO_ENABLED: '0'
+  BIN: pdfdistill-pdfcpu
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  macos-universal:
+    runs-on: macos-latest
+    outputs:
+      signed: ${{ steps.notarize.outputs.signed }}
+    env:
+      # Signing/notarization only outside pull requests and only when secrets exist
+      # (they are absent for forks).
+      SIGN: ${{ github.event_name != 'pull_request' && secrets.APPLE_DEVELOPER_ID_CERTIFICATE != '' && secrets.CODESIGN_APPLE_ID != '' && secrets.NOTARYTOOL_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -27,63 +34,253 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+      - name: Build (arm64 + amd64), lipo
+        run: |
+          set -euo pipefail
+          # The 4D wrapper's version() parses "pdfdistill-pdfcpu <hex> (pdfcpu vX.Y.Z)"
+          # from stderr with \s+([a-f0-9]+)\s\( -- the version must stay a short commit SHA.
+          VERSION="$(git rev-parse --short=7 HEAD)"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          mkdir -p build dist
+          for arch in arm64 amd64; do
+            GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" \
+              -o "build/$BIN-darwin-$arch" ./cmd/pdfdistill-pdfcpu
+          done
+          lipo -create -output "dist/$BIN" "build/$BIN-darwin-arm64" "build/$BIN-darwin-amd64"
+          chmod 755 "dist/$BIN"
+          lipo -info "dist/$BIN"
+          "dist/$BIN" testdata/ms-print-to-pdf-1.pdf -o "$RUNNER_TEMP/out.pdf" -v
+      - name: Check --version contract (stderr, hex commit)
+        run: |
+          set -euo pipefail
+          out=$("dist/$BIN" --version 2>/dev/null)
+          err=$("dist/$BIN" --version 2>&1 >/dev/null)
+          echo "$err"
+          [ -z "$out" ] || { echo "::error::--version must not write to stdout"; exit 1; }
+          grep -Eq '^pdfdistill-pdfcpu [a-f0-9]+ \(pdfcpu v' <<<"$err" || { echo "::error::unexpected --version output: $err"; exit 1; }
 
-  build:
-    needs: test
-    runs-on: macos-latest
+      - name: Setup keychain
+        id: keychain
+        if: env.SIGN == 'true'
+        uses: miyako/4D/.github/actions/deployment-setup-keychain@v1
+        with:
+          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+      - name: Codesign
+        if: env.SIGN == 'true'
+        env:
+          CODESIGN_APPLE_ID: ${{ secrets.CODESIGN_APPLE_ID }}
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.KEYCHAIN_PATH }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --keychain "$KEYCHAIN_PATH" \
+            --sign "$CODESIGN_APPLE_ID" "dist/$BIN"
+          codesign --verify --strict --verbose=2 "dist/$BIN"
+          codesign -dv --verbose=4 "dist/$BIN"
+
+      - name: Notarize
+        id: notarize
+        if: env.SIGN == 'true'
+        env:
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          NOTARYTOOL_PASSWORD: ${{ secrets.NOTARYTOOL_PASSWORD }}
+        run: |
+          # A bare Mach-O can't be stapled; notarize it inside a zip so Gatekeeper
+          # can find the ticket online.
+          ditto -c -k --keepParent "dist/$BIN" "$RUNNER_TEMP/notarize.zip"
+          auth=(--apple-id "$NOTARYTOOL_APPLE_ID" --team-id "$NOTARYTOOL_TEAM_ID" --password "$NOTARYTOOL_PASSWORD")
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${auth[@]}" \
+            --wait --output-format json | tee "$RUNNER_TEMP/notarize.json"
+          id=$(jq -r '.id' "$RUNNER_TEMP/notarize.json")
+          status=$(jq -r '.status' "$RUNNER_TEMP/notarize.json")
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization status: $status"
+            xcrun notarytool log "$id" "${auth[@]}" || true
+            exit 1
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signature
+        if: env.SIGN == 'true'
+        run: |
+          codesign --verify --strict --verbose=2 "dist/$BIN"
+          info=$(codesign -dv --verbose=2 "dist/$BIN" 2>&1)
+          echo "$info"
+          grep -q 'flags=0x10000(runtime)' <<<"$info" || { echo "::error::hardened runtime flag missing"; exit 1; }
+          # spctl assessment of a bare (unstapled) CLI tool is informational only
+          spctl --assess --type install --verbose=4 "dist/$BIN" || true
+          "dist/$BIN" --version
+          "dist/$BIN" testdata/ms-print-to-pdf-1.pdf -o "$RUNNER_TEMP/out.pdf"
+
+      - name: Cleanup keychain
+        if: always() && steps.keychain.outputs.KEYCHAIN_PATH != ''
+        env:
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.KEYCHAIN_PATH }}
+          CERTIFICATE_PATH: ${{ steps.keychain.outputs.CERTIFICATE_PATH }}
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" || true
+          rm -f "$CERTIFICATE_PATH" "$RUNNER_TEMP/notarize.zip"
+
+      - name: Smoke test amd64 slice under Rosetta
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 "dist/$BIN" --version || echo "Rosetta unavailable; skipped"
+      - name: Package
+        run: |
+          set -euo pipefail
+          d="dist/$BIN-macos-universal"
+          mkdir -p "$d"
+          cp "dist/$BIN" README.md LICENSE "$d/"
+          (cd dist && ditto -c -k --keepParent "$BIN-macos-universal" "$BIN-macos-universal.zip")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN }}-macos-universal
+          path: dist/${{ env.BIN }}-macos-universal.zip
+          if-no-files-found: error
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both build and test natively.
+          - arch: amd64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      GOOS: windows
+      GOARCH: ${{ matrix.arch }}
+      ASSET: pdfdistill-pdfcpu-windows-${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build binaries
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build
         run: |
           set -euo pipefail
-          VERSION="$(git describe --tags --always --dirty)"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
-          mkdir -p dist/tmp
-          for arch in arm64 amd64; do
-            GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/tmp/pdfdistill-pdfcpu-darwin-${arch}" ./cmd/pdfdistill-pdfcpu
-          done
-          lipo -create -output dist/tmp/pdfdistill-pdfcpu \
-            dist/tmp/pdfdistill-pdfcpu-darwin-arm64 dist/tmp/pdfdistill-pdfcpu-darwin-amd64
-          lipo -info dist/tmp/pdfdistill-pdfcpu
-          for arch in amd64 arm64; do
-            GOOS=windows GOARCH=$arch go build -trimpath -ldflags "$LDFLAGS" \
-              -o "dist/tmp/windows-${arch}/pdfdistill-pdfcpu.exe" ./cmd/pdfdistill-pdfcpu
-          done
-          ./dist/tmp/pdfdistill-pdfcpu --version
-          ./dist/tmp/pdfdistill-pdfcpu testdata/ms-print-to-pdf-1.pdf -o dist/tmp/check.pdf -v
-          (cd dist/tmp && zip -q "../pdfdistill-pdfcpu-${VERSION}-macos-universal.zip" pdfdistill-pdfcpu)
-          for arch in amd64 arm64; do
-            (cd "dist/tmp/windows-${arch}" && zip -q "../../pdfdistill-pdfcpu-${VERSION}-windows-${arch}.zip" pdfdistill-pdfcpu.exe)
-          done
-          rm -rf dist/tmp
-          (cd dist && shasum -a 256 ./*.zip > SHA256SUMS.txt)
-          ls -l dist
+          # Short commit SHA: see the --version contract in the macOS job.
+          VERSION="$(git rev-parse --short=7 HEAD)"
+          mkdir -p "dist/$ASSET"
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/$ASSET/$BIN.exe" ./cmd/pdfdistill-pdfcpu
+          "dist/$ASSET/$BIN.exe" testdata/ms-print-to-pdf-1.pdf -o "$RUNNER_TEMP/out.pdf" -v
+          out=$("dist/$ASSET/$BIN.exe" --version 2>/dev/null)
+          err=$("dist/$ASSET/$BIN.exe" --version 2>&1 >/dev/null)
+          echo "$err"
+          [ -z "$out" ] || { echo "::error::--version must not write to stdout"; exit 1; }
+          grep -Eq '^pdfdistill-pdfcpu [a-f0-9]+ \(pdfcpu v' <<<"$err" || { echo "::error::unexpected --version output: $err"; exit 1; }
+          cp README.md LICENSE "dist/$ASSET/"
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path "dist/$env:ASSET" -DestinationPath "dist/$env:ASSET.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: pdfdistill-pdfcpu-binaries
-          path: dist/*
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}.zip
           if-no-files-found: error
+
+  # Copy the binaries into the 4D component, commit them to main and trigger Publish.
+  # Only on push to main / manual dispatch on main; never for pull requests or tags.
+  ship:
+    if: >-
+      github.repository == 'miyako/pdfdistill-pdfcpu' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [macos-universal, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: ship-main
+      cancel-in-progress: false
+    env:
+      COMPONENT_BIN: pdfdistill-pdfcpu/Resources/bin
+    steps:
+      - name: Require signed macOS binary
+        if: needs.macos-universal.outputs.signed != 'true'
+        run: |
+          echo "::error::macOS binary was not signed/notarized (signing secrets missing?); refusing to ship."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+      - name: Copy binaries into the 4D component
+        env:
+          ART: ${{ runner.temp }}/artifacts
+        run: |
+          set -euo pipefail
+          for a in macos-universal windows-amd64 windows-arm64; do
+            unzip -o -q "$ART/$BIN-$a.zip" -d "$RUNNER_TEMP"
+          done
+          mkdir -p "$COMPONENT_BIN/macOS" "$COMPONENT_BIN/Windows" "$COMPONENT_BIN/WindowsARM"
+          install -m 755 "$RUNNER_TEMP/$BIN-macos-universal/$BIN"   "$COMPONENT_BIN/macOS/$BIN"
+          install -m 644 "$RUNNER_TEMP/$BIN-windows-amd64/$BIN.exe" "$COMPONENT_BIN/Windows/$BIN.exe"
+          install -m 644 "$RUNNER_TEMP/$BIN-windows-arm64/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"
+          # -f: *.exe is in .gitignore (the component's bin folder is re-included there,
+          # but don't rely on it).
+          git add -f "$COMPONENT_BIN/macOS/$BIN" "$COMPONENT_BIN/Windows/$BIN.exe" "$COMPONENT_BIN/WindowsARM/$BIN.exe"
+          git update-index --chmod=+x "$COMPONENT_BIN/macOS/$BIN"
+          git status --short
+          git ls-files -s "$COMPONENT_BIN"
+      - name: Commit and push
+        id: commit
+        run: |
+          set -euo pipefail
+          if git diff --cached --quiet; then
+            echo "Binaries unchanged; nothing to commit."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update CLI binaries in 4D component (${GITHUB_SHA::7}) [skip ci]"
+          for _ in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git pull --rebase origin main
+          done
+          echo "::error::Failed to push binaries to main"
+          exit 1
+      - name: Trigger Publish
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f use_self_hosted=false -f mode=patch
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [macos-universal, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pdfdistill-pdfcpu-binaries
           path: dist
+          merge-multiple: true
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+          set -euo pipefail
+          (cd dist && sha256sum ./*.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes
