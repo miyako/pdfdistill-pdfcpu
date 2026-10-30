@@ -34,5 +34,4 @@ go.work.sum
 
 # Build output
 /dist/
-/pdfdistill-pdfcpu
 *.distilled.pdf
