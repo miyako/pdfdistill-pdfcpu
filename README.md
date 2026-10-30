@@ -1,15 +1,124 @@
 # pdfdistill-pdfcpu
 
-A single-binary command-line tool that shrinks bloated PDFs — in particular the
-output of **Microsoft Print to PDF**, which embeds complete TrueType fonts and
-stores photos as lossless Flate images.
+Shrinks bloated PDFs — in particular the ones produced by **Microsoft Print to PDF**, which
+embeds complete TrueType fonts and stores photos as lossless Flate images — by deduplicating
+objects, subsetting fonts, recompressing/downsampling images and rewriting the file structure.
 
-Written in pure Go (`CGO_ENABLED=0`) on top of [pdfcpu](https://github.com/pdfcpu/pdfcpu).
-It is one of three sibling implementations (Rust/lopdf, C++/qpdf, Go/pdfcpu)
-that share the same command-line interface so they can be benchmarked against
-each other.
+This repository contains:
 
-## Usage
+* a **[4D component](#4d-component)** (`pdfdistill-pdfcpu/`) that lets 4D applications distill
+  PDFs through the class `cs.pdfcpu.distill`;
+* the **[command-line tool](#command-line-tool)** it wraps: a single, self-contained binary
+  written in pure Go (`CGO_ENABLED=0`) on top of [pdfcpu](https://github.com/pdfcpu/pdfcpu),
+  with only permissively licensed dependencies.
+
+## 4D component
+
+The component bundles the `pdfdistill-pdfcpu` executable — a signed and notarized universal
+binary for macOS, and builds for Windows x64 and ARM64 — in
+`Resources/bin/{macOS,Windows,WindowsARM}` (see [CI / releases](#ci--releases)) and runs it with
+`4D.SystemWorker`. If the executable for the current platform is missing, `pdfdistill-pdfcpu`
+is looked up on the `PATH`. No plug-in is involved. It targets 4D 20 and later.
+
+### Installation
+
+**Project Dependencies (4D 20 R6 and later):** add the component from the *Project
+Dependencies* panel (GitHub repository `miyako/pdfdistill-pdfcpu`), or declare it in your
+project's `Project/Sources/dependencies.json`:
+
+```json
+{
+  "dependencies": {
+    "pdfdistill-pdfcpu": {
+      "github": "miyako/pdfdistill-pdfcpu",
+      "version": "^20.0.0"
+    }
+  }
+}
+```
+
+**Manual:** download `pdfdistill-pdfcpu.zip` from the
+[latest release](https://github.com/miyako/pdfdistill-pdfcpu/releases/latest) and place the
+compiled component in your project's `Components` folder.
+
+The component's classes are exposed in the `cs.pdfcpu` class store.
+
+### Quick start
+
+```4d
+var $distill : cs.pdfcpu.distill
+$distill:=cs.pdfcpu.distill.new()
+
+var $version : Text
+$version:=$distill.version()  // commit hash of the CLI build, e.g. "cee530f"
+
+var $in; $out : 4D.File
+$in:=Folder(fk desktop folder).file("report.pdf")
+$out:=Folder(fk desktop folder).file("report.distilled.pdf")
+
+// file to file, synchronous; each task is a collection of CLI arguments
+$distill.execute([$in; "-o"; $out; "--quality"; 60; "--max-dpi"; 150])
+
+// several tasks in one call, e.g. lossless only
+$distill.execute([\
+  [$in; "-o"; $out; "--lossless"]; \
+  [Folder(fk desktop folder).file("other.pdf"); "--no-images"]])  // -> other.distilled.pdf
+
+// Blob in (via stdin), Blob out (via stdout)
+var $pdf : 4D.Blob
+$pdf:=$in.getContent()
+var $result : Object
+$result:=$distill.execute(["-"; "--quality"; 60; {file: $pdf}])[0]
+// $result.response: 4D.Blob (the PDF), $result.responseError: Text, $result.exitCode: Integer
+```
+
+Task elements are mapped to the command line by type: `4D.File` → its path, Text → an argument
+(flags such as `"--lossless"`), Number → its value, and an object `{data: …; file: …}` supplies
+a callback context (`data`) and/or the stdin payload (`file`, used when the input is `"-"`).
+Synchronous calls return one object per task: `{response: 4D.Blob; responseError: Text;
+exitCode: Integer}` (stdout, stderr, and `0` success / `1` runtime error / `2` usage error).
+For Blob in / Blob out, use `["-"; …options; {file: $blob}]`; the PDF is returned in `response`.
+
+`version()` runs `pdfdistill-pdfcpu --version`, reads its **stderr** (the CLI never writes
+`--version`/`--help` to stdout) and returns the hexadecimal commit hash from
+`pdfdistill-pdfcpu <commit> (pdfcpu vX.Y.Z)` — see the
+[version string contract](#building).
+
+To run asynchronously, pass an `onResponse` callback; it receives the `4D.SystemWorker`
+(`exitCode`, and the CLI's summary line in `responseError`) and the event object, whose
+`context` is the task's `data`. The calling process must stay alive until the callback fires:
+
+```4d
+#DECLARE($params : Object)
+
+If ($params=Null)
+	CALL WORKER(1; Current method name; {})
+Else 
+	var $in; $out : 4D.File
+	$in:=Folder(fk desktop folder).file("report.pdf")
+	$out:=Folder(fk desktop folder).file("report.distilled.pdf")
+	
+	cs.pdfcpu.distill.new().execute([[$in; "-o"; $out; {data: $out}]]; \
+		{onResponse: Formula(ALERT(String($1.exitCode)+": "+$1.responseError))})
+End if 
+```
+
+### Class documentation
+
+* [`distill`](pdfdistill-pdfcpu/Documentation/Classes/distill.md) — public API: `version()`,
+  `execute()`, `terminate()`, options, callbacks and examples
+* Internal: [`_CLI`](pdfdistill-pdfcpu/Documentation/Classes/_CLI.md),
+  [`_CLI_Controller`](pdfdistill-pdfcpu/Documentation/Classes/_CLI_Controller.md),
+  [`_distill_Controller`](pdfdistill-pdfcpu/Documentation/Classes/_distill_Controller.md)
+
+## Command-line tool
+
+The CLI is written in pure Go (`CGO_ENABLED=0`) on top of
+[pdfcpu](https://github.com/pdfcpu/pdfcpu) and is one of three sibling implementations
+(Rust/lopdf, C++/qpdf, Go/pdfcpu) that share the same command-line interface so they can be
+benchmarked against each other.
+
+### Usage
 
 ```
 pdfdistill-pdfcpu <INPUT|-> [-o <OUTPUT|->] [options]
@@ -40,8 +149,14 @@ Behaviour:
 * `<input>.distilled.pdf` replaces a trailing `.pdf` (case-insensitive), e.g.
   `report.pdf` → `report.distilled.pdf`; other names get the suffix appended.
 * All diagnostics go to **stderr**; stdout only ever carries PDF bytes.
-  By default one summary line is printed; `-q` silences it, `-v` adds per-step
-  statistics.
+  This includes `--version` and `--help`, which print to stderr and exit `0`.
+  By default one summary line is printed, e.g.
+  `report.pdf -> report.distilled.pdf: 720651 -> 116143 bytes (-83.9%)`;
+  `-q` silences it, `-v` adds per-step statistics. When `-` is used, messages
+  name the streams `stdin` / `stdout` (no angle brackets), e.g.
+  `stdin -> stdout: 720651 -> 116145 bytes (-83.9%)` or
+  `pdfdistill-pdfcpu: stdin: <error>`.
+* Lines end with a bare `\n` on every platform, including Windows.
 * **The output is never larger than the input.** If the optimized result is not
   smaller, the original bytes are written unchanged.
 * Exit codes: `0` success, `1` runtime error (unreadable PDF, I/O),
@@ -51,7 +166,7 @@ Behaviour:
 * Encrypted PDFs are passed through unchanged (original bytes written, exit 0).
 * Files are written atomically (temporary file + rename).
 
-## What it does
+### What it does
 
 The pipeline (`internal/distill`) runs these steps in order:
 
@@ -104,7 +219,7 @@ The pipeline (`internal/distill`) runs these steps in order:
 
 Text in content streams is never rewritten.
 
-### Font subsetting: choice of implementation
+#### Font subsetting: choice of implementation
 
 Go has no general-purpose permissive TrueType *writer*. Options considered:
 
@@ -120,7 +235,7 @@ The GID-retaining approach keeps `loca`/`hmtx` sized for the full glyph count
 (for the 24,411-glyph Yu Gothic UI this is ~100 KB raw), but those tables are
 mostly zeros and compress to a few KB.
 
-### JPEG encoder
+#### JPEG encoder
 
 JPEG encoding uses the standard library `image/jpeg` (baseline, 4:2:0 chroma
 subsampling, standard Huffman tables). It is noticeably less efficient than
@@ -129,7 +244,7 @@ progressive mode — typically 5–15 % smaller at equal visual quality) but kee
 the binary pure Go with no C dependency. Quality numbers are therefore not
 exactly comparable with the libjpeg-turbo/mozjpeg-based siblings.
 
-## Results
+### Results
 
 Fixture `testdata/ms-print-to-pdf-1.pdf` (Microsoft Print to PDF, 1 page,
 Yu Gothic UI fully embedded, two 512×512 RGB Flate images with Gray SMasks):
@@ -156,37 +271,89 @@ to the input; default output differs only by JPEG artefacts. Extracted text
 Outputs are not byte-for-byte reproducible between runs: pdfcpu updates
 `/ModDate` and the trailer `/ID`.
 
-## Building
+### Building
 
 Requires Go (version per `go.mod`; the toolchain is downloaded automatically).
+Builds are pure Go (`CGO_ENABLED=0`), so every target can be cross-compiled
+from any OS.
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v0.1.0" \
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X main.version=$(git rev-parse --short=7 HEAD)" \
   -o pdfdistill-pdfcpu ./cmd/pdfdistill-pdfcpu
 ```
+
+> **Version string contract.** `--version` prints
+> `pdfdistill-pdfcpu <commit> (pdfcpu vX.Y.Z)` to **stderr** (e.g.
+> `pdfdistill-pdfcpu cee530f (pdfcpu v0.16.4)`). The 4D component's
+> `distill.version()` reads stderr and extracts the version with the regular
+> expression `\s+([a-f0-9]+)\s\(`, so `main.version` must be a lowercase
+> hexadecimal string — the short commit SHA, as injected by CI. Without
+> `-ldflags "-X main.version=…"` the binary reports `dev` and `version()`
+> returns an empty string. Don't move `--version` to stdout or change the
+> format without updating `distill.4dm`.
 
 macOS universal binary:
 
 ```sh
+V=$(git rev-parse --short=7 HEAD)
 for arch in arm64 amd64; do
-  CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "-s -w" \
+  CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$V" \
     -o pdfdistill-pdfcpu-$arch ./cmd/pdfdistill-pdfcpu
 done
 lipo -create -output pdfdistill-pdfcpu pdfdistill-pdfcpu-arm64 pdfdistill-pdfcpu-amd64
 ```
 
-Windows (from any OS):
+Windows x64 / ARM64 (from any OS):
 
 ```sh
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
-  -o pdfdistill-pdfcpu.exe ./cmd/pdfdistill-pdfcpu
+V=$(git rev-parse --short=7 HEAD)
+for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$V" \
+    -o windows-$arch/pdfdistill-pdfcpu.exe ./cmd/pdfdistill-pdfcpu
+done
 ```
 
-CI (`.github/workflows/build.yml`) tests on macOS and Windows, builds a macOS
-universal binary plus windows-amd64 and windows-arm64 executables, uploads them
-as artifacts, and publishes a GitHub release when a `v*` tag is pushed.
+#### CI / releases
 
-## Testing
+`.github/workflows/build.yml` (Build) runs on GitHub-hosted runners:
+
+| Job | Runner | Does |
+|---|---|---|
+| `macos-universal` | `macos-latest` | `go vet`, `go test`, builds darwin/arm64 + darwin/amd64 and merges them with `lipo`, checks the `--version` contract, smoke-tests the amd64 slice under Rosetta, uploads `pdfdistill-pdfcpu-macos-universal.zip` |
+| `windows` (amd64) | `windows-latest` | `go vet`, `go test`, native build, `--version` check, uploads `pdfdistill-pdfcpu-windows-amd64.zip` |
+| `windows` (arm64) | `windows-11-arm` | same, natively on Windows on ARM, uploads `pdfdistill-pdfcpu-windows-arm64.zip` |
+
+Each archive contains the binary, this README and `LICENSE`. The version is
+injected with `-ldflags "-X main.version=<short commit SHA>"` (see the version
+string contract above). Pull requests only build and test.
+
+On push to `main` (changes outside `pdfdistill-pdfcpu/`) or a manual run on
+`main`, Build also:
+
+1. code signs the macOS universal binary (Developer ID, hardened runtime,
+   secure timestamp) and notarizes it with `notarytool`; the job fails unless
+   notarization is `Accepted` (a bare Mach-O can't be stapled, so Gatekeeper
+   fetches the ticket online). The temporary keychain is always deleted;
+2. copies the binaries into the 4D component —
+   `pdfdistill-pdfcpu/Resources/bin/macOS/pdfdistill-pdfcpu` (mode `100755`),
+   `pdfdistill-pdfcpu/Resources/bin/Windows/pdfdistill-pdfcpu.exe`,
+   `pdfdistill-pdfcpu/Resources/bin/WindowsARM/pdfdistill-pdfcpu.exe` — and
+   commits them to `main` as `github-actions[bot]` if they changed (the
+   `pdfdistill-pdfcpu/**` path filter keeps that commit from rebuilding the CLI);
+3. dispatches the Publish workflow (`publish.yml`, patch bump), which builds,
+   signs and releases the 4D component from that commit.
+
+Signing uses the same repository secrets as Publish
+(`APPLE_DEVELOPER_ID_CERTIFICATE`, `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`,
+`KEYCHAIN_PASSWORD`, `CODESIGN_APPLE_ID`, `NOTARYTOOL_APPLE_ID`,
+`NOTARYTOOL_TEAM_ID`, `NOTARYTOOL_PASSWORD`). Signing steps are skipped for pull
+requests and when the secrets are absent; the ship step then refuses to run.
+
+Pushing a `v*` tag creates a GitHub release with the three CLI archives and
+`SHA256SUMS.txt`.
+
+### Testing
 
 ```sh
 go test ./...
@@ -199,7 +366,7 @@ deduplication, the never-larger rule, and a size regression against the
 fixture (default output must stay ≤ 140,000 bytes). A rendering comparison
 test runs when `pdftoppm` (poppler) is on `PATH` and is skipped otherwise.
 
-## Dependencies and licenses
+### Dependencies and licenses
 
 | Module | License |
 |---|---|
@@ -213,6 +380,7 @@ test runs when `pdftoppm` (poppler) is on `PATH` and is skipped otherwise.
 
 No GPL/LGPL/AGPL or commercial code; no cgo.
 
-## License
+## Licenses
 
-MIT — see [LICENSE](LICENSE).
+pdfdistill-pdfcpu (CLI and 4D component) is MIT licensed — see [LICENSE](LICENSE).
+All Go dependencies are permissively licensed (table above).
