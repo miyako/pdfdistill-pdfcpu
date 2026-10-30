@@ -43,7 +43,7 @@ Function onResponse($worker : 4D:C1709.SystemWorker; $params : Object)
 		$instance.onResponse.call(This:C1470; $worker; $params)
 	Else 
 		This:C1470.stdOut:=$worker.response
-		This:C1470.stdErr:=Replace string:C233($worker.responseError; "<stdio>"; "stdio"; *)
+		This:C1470.stdErr:=$worker.responseError
 	End if 
 	
 Function onError($worker : 4D:C1709.SystemWorker; $params : Object)
@@ -54,7 +54,7 @@ Function onError($worker : 4D:C1709.SystemWorker; $params : Object)
 	If (OB Instance of:C1731($instance.onError; 4D:C1709.Function))
 		$instance.onError.call($worker; $params)
 	Else 
-		This:C1470.stdErr:=Replace string:C233($worker.responseError; "<stdio>"; "stdio"; *)
+		This:C1470.stdErr:=$worker.responseError
 	End if 
 	
 Function onTerminate($worker : 4D:C1709.SystemWorker; $params : Object)

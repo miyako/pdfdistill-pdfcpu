@@ -2,7 +2,7 @@
 #DECLARE($worker : 4D:C1709.SystemWorker; $params : Object)
 
 var $text : Text
-$text:=Replace string:C233($worker.responseError; "<stdio>"; "stdio"; *)  //information
+$text:="pdfdistill-pdfcpu: "+$worker.responseError  //information
 ALERT:C41($text)
 
 var $data : 4D:C1709.Blob
